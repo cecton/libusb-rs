@@ -13,6 +13,7 @@ struct Endpoint {
 }
 
 fn main() {
+    /*
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 3 {
@@ -20,11 +21,15 @@ fn main() {
         return;
     }
 
-    let vid: u16 = FromStr::from_str(args[1].as_ref()).unwrap();
-    let pid: u16 = FromStr::from_str(args[2].as_ref()).unwrap();
+    let vid = u16::from_str_radix(args[1].as_ref(), 16).unwrap();
+    let pid = u16::from_str_radix(args[2].as_ref(), 16).unwrap();
+    */
+    let vid = 0x1efb;
+    let pid = 0x1591;
 
     match libusb::Context::new() {
         Ok(mut context) => {
+            //context.set_log_level(libusb::LogLevel::Debug);
             match open_device(&mut context, vid, pid) {
                 Some((mut device, device_desc, mut handle)) => read_device(&mut device, &device_desc, &mut handle).unwrap(),
                 None => println!("could not find device {:04x}:{:04x}", vid, pid)
@@ -74,17 +79,46 @@ fn read_device(device: &mut libusb::Device, device_desc: &libusb::DeviceDescript
         println!("Serial Number: {:?}", handle.read_serial_number_string(language, device_desc, timeout).ok());
     }
 
+    match find_writable_endpoint(device, device_desc, libusb::TransferType::Interrupt) {
+        Some(endpoint) => write_endpoint(handle, endpoint),
+        None => println!("No readable interrupt endpoint")
+    }
+
+    //try!(handle.reset());
+    //std::thread::sleep_ms(1000);
+
     match find_readable_endpoint(device, device_desc, libusb::TransferType::Interrupt) {
         Some(endpoint) => read_endpoint(handle, endpoint, libusb::TransferType::Interrupt),
         None => println!("No readable interrupt endpoint")
     }
 
-    match find_readable_endpoint(device, device_desc, libusb::TransferType::Bulk) {
-        Some(endpoint) => read_endpoint(handle, endpoint, libusb::TransferType::Bulk),
-        None => println!("No readable bulk endpoint")
+    Ok(())
+}
+
+fn find_writable_endpoint(device: &mut libusb::Device, device_desc: &libusb::DeviceDescriptor, transfer_type: libusb::TransferType) -> Option<Endpoint> {
+    for n in 0..device_desc.num_configurations() {
+        let config_desc = match device.config_descriptor(n) {
+            Ok(c) => c,
+            Err(_) => continue
+        };
+
+        for interface in config_desc.interfaces() {
+            for interface_desc in interface.descriptors() {
+                for endpoint_desc in interface_desc.endpoint_descriptors() {
+                    if endpoint_desc.direction() == libusb::Direction::Out && endpoint_desc.transfer_type() == transfer_type {
+                        return Some(Endpoint {
+                            config: config_desc.number(),
+                            iface: interface_desc.interface_number(),
+                            setting: interface_desc.setting_number(),
+                            address: endpoint_desc.address()
+                        });
+                    }
+                }
+            }
+        }
     }
 
-    Ok(())
+    None
 }
 
 fn find_readable_endpoint(device: &mut libusb::Device, device_desc: &libusb::DeviceDescriptor, transfer_type: libusb::TransferType) -> Option<Endpoint> {
@@ -113,6 +147,44 @@ fn find_readable_endpoint(device: &mut libusb::Device, device_desc: &libusb::Dev
     None
 }
 
+fn write_endpoint(handle: &mut libusb::DeviceHandle, endpoint: Endpoint) {
+    println!("Writing from endpoint: {:?}", endpoint);
+
+    let has_kernel_driver = match handle.kernel_driver_active(endpoint.iface) {
+        Ok(true) => {
+            handle.detach_kernel_driver(endpoint.iface).ok();
+            true
+        },
+        _ => false
+    };
+
+    println!(" - kernel driver? {}", has_kernel_driver);
+
+    match configure_endpoint(handle, &endpoint) {
+        Ok(_) => {
+            let mut vec = vec![0x00, 0x00, 0x07];
+            let mut buf = unsafe { slice::from_raw_parts_mut((&mut vec[..]).as_mut_ptr(), vec.capacity()) };
+
+            let timeout = Duration::from_secs(3);
+
+            match handle.write_interrupt(endpoint.address, buf, timeout) {
+                Ok(len) => {
+                    vec.truncate(len);
+                    println!(" - write: {:?}", vec);
+                },
+                Err(err) => println!("could not read from endpoint: {}", err)
+            }
+        },
+        Err(err) => println!("could not configure endpoint: {}", err)
+    }
+
+    if has_kernel_driver {
+        handle.attach_kernel_driver(endpoint.iface).ok();
+    }
+
+    handle.release_interface(endpoint.iface);
+}
+
 fn read_endpoint(handle: &mut libusb::DeviceHandle, endpoint: Endpoint, transfer_type: libusb::TransferType) {
     println!("Reading from endpoint: {:?}", endpoint);
 
@@ -131,7 +203,7 @@ fn read_endpoint(handle: &mut libusb::DeviceHandle, endpoint: Endpoint, transfer
             let mut vec = Vec::<u8>::with_capacity(256);
             let mut buf = unsafe { slice::from_raw_parts_mut((&mut vec[..]).as_mut_ptr(), vec.capacity()) };
 
-            let timeout = Duration::from_secs(1);
+            let timeout = Duration::from_secs(3);
 
             match transfer_type {
                 libusb::TransferType::Interrupt => {
