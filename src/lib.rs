@@ -34,6 +34,7 @@ mod device;
 mod device_handle;
 
 mod fields;
+mod dfu_func_descriptor;
 mod device_descriptor;
 mod config_descriptor;
 mod interface_descriptor;

@@ -9,6 +9,7 @@ use libusb::*;
 
 use context::Context;
 use error::{self, Error};
+use dfu_func_descriptor::DfuFuncDescriptor;
 use device_descriptor::DeviceDescriptor;
 use config_descriptor::ConfigDescriptor;
 use interface_descriptor::InterfaceDescriptor;
@@ -489,6 +490,22 @@ impl<'a> DeviceHandle<'a> {
         match interface.description_string_index() {
             None => Err(Error::InvalidParam),
             Some(n) => self.read_string_descriptor(language, n, timeout)
+        }
+    }
+
+    pub fn read_dfu_func_descriptor(&self) -> Option<DfuFuncDescriptor> {
+        unsafe {
+            let mut descriptor: libusb_dfu_func_descriptor = mem::uninitialized();
+            let ret = libusb_get_descriptor(self.handle,
+                                            LIBUSB_DT_DFU,
+                                            0,
+                                             &mut descriptor as *mut _ as *mut c_uchar,
+                                            mem::size_of::<libusb_dfu_func_descriptor>() as i32);
+            if ret > -1 {
+                Some(crate::dfu_func_descriptor::from_libusb(descriptor))
+            } else {
+                None
+            }
         }
     }
 }
